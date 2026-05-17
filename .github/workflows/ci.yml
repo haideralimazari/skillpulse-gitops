@@ -30,16 +30,13 @@ jobs:
             --config "p/default" \
             --config "p/owasp-top-ten" \
             --config "p/secrets" \
-            --severity=ERROR || true \
+            --severity=ERROR \
             --sarif \
             --output semgrep.sarif \
-            --error \
-            .
-        
+            . || true
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
-      
       - name: Upload Semgrep SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v4
