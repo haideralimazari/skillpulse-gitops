@@ -1,0 +1,82 @@
+name: CD (GitOps)
+
+on:
+  repository_dispatch:
+    types: [ci-success]
+
+jobs:
+  bump-manifests:
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+        
+          # token: ${{ secrets.GH_BOT_PAT }}
+
+      - name: Validate inputs
+        env:
+          SHA: ${{ github.event.client_payload.sha }}
+          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          if [ -z "$DOCKER_USER" ]; then
+            echo "ERROR: DOCKERHUB_USERNAME secret is not set."
+            exit 1
+          fi
+          if [ -z "$SHA" ]; then
+            echo "ERROR: SHA not passed in client_payload."
+            exit 1
+          fi
+          # SHA format validate karo (40-char hex)
+          if ! echo "$SHA" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "ERROR: Invalid SHA format: $SHA"
+            exit 1
+          fi
+          echo "SHA=${SHA}" >> "$GITHUB_ENV"
+          echo "DOCKER_USER=${DOCKER_USER}" >> "$GITHUB_ENV"
+
+      - name: Pin backend + frontend images to commit SHA
+        run: |
+          sed -i "s|image: ${DOCKER_USER}/skillpulse-backend:.*|image: ${DOCKER_USER}/skillpulse-backend:${SHA}|"  k8s/20-backend.yaml
+          sed -i "s|image: ${DOCKER_USER}/skillpulse-frontend:.*|image: ${DOCKER_USER}/skillpulse-frontend:${SHA}|" k8s/30-frontend.yaml
+
+          # Verify sed actually kuch change kiya — agar pattern match nahi hua toh exit
+          if grep -q "skillpulse-backend:${SHA}" k8s/20-backend.yaml && \
+             grep -q "skillpulse-frontend:${SHA}" k8s/30-frontend.yaml; then
+            echo "✅ Image tags updated successfully."
+          else
+            echo "ERROR: sed did not update image tags. Pattern match failed."
+            exit 1
+          fi
+
+      - name: Commit + push with rebase retry
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "Manifests already pinned to ${SHA}; nothing to commit."
+            exit 0
+          fi
+
+          git add k8s/20-backend.yaml k8s/30-frontend.yaml
+          git commit -m "deploy: pin backend+frontend to ${SHA:0:7}
+
+          Triggered by: ${{ github.event.client_payload.sha }}
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Race condition handle karo — 3 baar retry with rebase
+          for i in 1 2 3; do
+            if git push; then
+              echo "✅ Pushed successfully on attempt ${i}."
+              exit 0
+            fi
+            echo "Push failed (attempt ${i}), rebasing and retrying..."
+            git pull --rebase origin main
+          done
+
+          echo "ERROR: Failed to push after 3 attempts."
+          exit 1

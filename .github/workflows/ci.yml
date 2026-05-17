@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'k8s/**'
+      - 'docs/**'
+      - '**/*.md'
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Job 1: SAST — Semgrep
+  # ─────────────────────────────────────────────
+  semgrep:
+    name: SAST Scan (Semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/default
+            p/owasp-top-ten
+            p/secrets
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+      - name: Upload Semgrep SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+
+  # ─────────────────────────────────────────────
+  # Job 2: Build & Push Docker images
+  # ─────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    outputs:
+      backend-image: ${{ steps.meta-backend.outputs.tags }}
+      frontend-image: ${{ steps.meta-frontend.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push backend
+        id: meta-backend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          push: ${{ vars.DEPLOY_ENABLED == 'true' }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/skillpulse-backend:latest', secrets.DOCKERHUB_USERNAME) || 'skillpulse-backend:latest' }}
+            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/skillpulse-backend:{1}', secrets.DOCKERHUB_USERNAME, github.sha) || format('skillpulse-backend:{0}', github.sha) }}
+
+      - name: Build and push frontend
+        id: meta-frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          push: ${{ vars.DEPLOY_ENABLED == 'true' }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/skillpulse-frontend:latest', secrets.DOCKERHUB_USERNAME) || 'skillpulse-frontend:latest' }}
+            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/skillpulse-frontend:{1}', secrets.DOCKERHUB_USERNAME, github.sha) || format('skillpulse-frontend:{0}', github.sha) }}
+
+  # ─────────────────────────────────────────────
+  # Job 3: Container Scan — Trivy (Backend)
+  # ─────────────────────────────────────────────
+  trivy-backend:
+    name: Trivy Scan — Backend
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy on backend image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: >-
+            ${{ secrets.DOCKERHUB_USERNAME != '' &&
+              format('{0}/skillpulse-backend:{1}', secrets.DOCKERHUB_USERNAME, github.sha) ||
+              format('skillpulse-backend:{0}', github.sha) }}
+          format: sarif
+          output: trivy-backend.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'           # pipeline fail karo agar CRITICAL/HIGH mile
+          ignore-unfixed: true
+
+      - name: Upload Trivy backend SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-backend.sarif
+          category: trivy-backend
+
+  # ─────────────────────────────────────────────
+  # Job 4: Container Scan — Trivy (Frontend)
+  # ─────────────────────────────────────────────
+  trivy-frontend:
+    name: Trivy Scan — Frontend
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy on frontend image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: >-
+            ${{ secrets.DOCKERHUB_USERNAME != '' &&
+              format('{0}/skillpulse-frontend:{1}', secrets.DOCKERHUB_USERNAME, github.sha) ||
+              format('skillpulse-frontend:{0}', github.sha) }}
+          format: sarif
+          output: trivy-frontend.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Upload Trivy frontend SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-frontend.sarif
+          category: trivy-frontend
