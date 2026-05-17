@@ -118,6 +118,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      
+      - name: Pull backend image
+        run: docker pull ${{ needs.build-and-push.outputs.backend-tag }}
+ 
       - name: Run Trivy on backend image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -148,6 +152,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+
+      - name: Pull frontend image
+        run: docker pull ${{ needs.build-and-push.outputs.frontend-tag }}
 
       - name: Run Trivy on frontend image
         uses: aquasecurity/trivy-action@v0.36.0
