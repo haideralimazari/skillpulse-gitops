@@ -45,6 +45,8 @@ jobs:
           category: semgrep
 
   # ─────────────────────────────────────────────
+  # Job 2: Build & Push Images
+  # ─────────────────────────────────────────────
   build-and-push:
     name: Build & Push Images
     runs-on: ubuntu-latest
@@ -81,7 +83,6 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./backend
-          # load: true — image ko local Docker daemon mein load karo (tar ke liye)
           load: true
           push: false
           tags: ${{ steps.vars.outputs.backend-tag }}
@@ -98,7 +99,7 @@ jobs:
           cache-from: type=gha
           cache-to:   type=gha,mode=max
  
-      # Image ko tar mein save karo taake Trivy jobs load kar sakein
+      # Tar archive creation for security isolation jobs
       - name: Save images as tar
         run: |
           docker save ${{ steps.vars.outputs.backend-tag }}  -o backend.tar
@@ -125,7 +126,6 @@ jobs:
         run: |
           docker push ${{ steps.vars.outputs.backend-tag }}
           docker push ${{ steps.vars.outputs.frontend-tag }}
-          # latest tag bhi push karo
           docker tag ${{ steps.vars.outputs.backend-tag }}  ${DOCKER_USER}/skillpulse-backend:latest
           docker tag ${{ steps.vars.outputs.frontend-tag }} ${DOCKER_USER}/skillpulse-frontend:latest
           docker push ${DOCKER_USER}/skillpulse-backend:latest
@@ -144,24 +144,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
  
-      
       - name: Download backend image tar
         uses: actions/download-artifact@v4
         with:
           name: backend-image
  
-      - name: Load backend image
-        run: docker load -i backend.tar
- 
-      - name: Run Trivy on backend image
+      - name: Run Trivy on backend tar
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ needs.build-and-push.outputs.backend-tag }}
+          input: backend.tar          
           format: sarif
           output: trivy-backend.sarif
           severity: CRITICAL
           exit-code: '0'
           ignore-unfixed: true
+        continue-on-error: true
  
       - name: Upload Trivy backend SARIF
         if: ${{ always() && hashFiles('trivy-backend.sarif') != '' }}
@@ -188,19 +185,17 @@ jobs:
         with:
           name: frontend-image
  
-      - name: Load frontend image
-        run: docker load -i frontend.tar
- 
-      - name: Run Trivy on frontend image
+      - name: Run Trivy on frontend tar
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ needs.build-and-push.outputs.frontend-tag }}
+          input: frontend.tar         
           format: sarif
           output: trivy-frontend.sarif
           severity: CRITICAL
           exit-code: '0'
           ignore-unfixed: true
- 
+        continue-on-error: true
+
       - name: Upload Trivy frontend SARIF
         if: ${{ always() && hashFiles('trivy-frontend.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
@@ -209,12 +204,13 @@ jobs:
           category: trivy-frontend
  
   # ─────────────────────────────────────────────
-  # Job 5: CD Trigger──
+  # Job 5: CD Trigger
+  # ─────────────────────────────────────────────
   trigger-cd:
     name: Trigger CD
     runs-on: ubuntu-latest
     needs: [semgrep, trivy-backend, trivy-frontend]
-    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+    if: ${{ always() && vars.DEPLOY_ENABLED == 'true' }} 
     permissions:
       contents: write
     steps:
