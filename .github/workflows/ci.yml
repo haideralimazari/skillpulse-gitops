@@ -21,21 +21,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: >-
-            p/default
-            p/owasp-top-ten
-            p/secrets
+      - name: Install Semgrep
+        run: pip install semgrep --break-system-packages
+
+      - name: Run Semgrep SAST scan
+        run: |
+          semgrep scan \
+            --config "p/default" \
+            --config "p/owasp-top-ten" \
+            --config "p/secrets" \
+            --sarif \
+            --output semgrep.sarif \
+            --error \
+            .
+        
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
+      
       - name: Upload Semgrep SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: semgrep.sarif
+          category: semgrep
 
   # ─────────────────────────────────────────────
   # Job 2: Build & Push Docker images
@@ -44,12 +53,30 @@ jobs:
     name: Build & Push Images
     runs-on: ubuntu-latest
     outputs:
-      backend-image: ${{ steps.meta-backend.outputs.tags }}
-      frontend-image: ${{ steps.meta-frontend.outputs.tags }}
+      backend-tag:  ${{ steps.vars.outputs.backend-tag }}
+      frontend-tag: ${{ steps.vars.outputs.frontend-tag }}
+      docker-user:  ${{ steps.vars.outputs.docker-user }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v4
+
+      - name: Compute image tags
+        id: vars
+        env:
+          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          if [ -z "$DOCKER_USER" ]; then
+            echo "WARNING: DOCKERHUB_USERNAME not set — images will not be pushed."
+            BACKEND_TAG="skillpulse-backend:${{ github.sha }}"
+            FRONTEND_TAG="skillpulse-frontend:${{ github.sha }}"
+          else
+            BACKEND_TAG="${DOCKER_USER}/skillpulse-backend:${{ github.sha }}"
+            FRONTEND_TAG="${DOCKER_USER}/skillpulse-frontend:${{ github.sha }}"
+          fi
+          echo "backend-tag=${BACKEND_TAG}"   >> "$GITHUB_OUTPUT"
+          echo "frontend-tag=${FRONTEND_TAG}" >> "$GITHUB_OUTPUT"
+          echo "docker-user=${DOCKER_USER}"   >> "$GITHUB_OUTPUT"
 
       - uses: docker/login-action@v4
         if: ${{ vars.DEPLOY_ENABLED == 'true' }}
@@ -58,28 +85,28 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push backend
-        id: meta-backend
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: ./backend
           push: ${{ vars.DEPLOY_ENABLED == 'true' }}
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/skillpulse-backend:latest', secrets.DOCKERHUB_USERNAME) || 'skillpulse-backend:latest' }}
-            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/skillpulse-backend:{1}', secrets.DOCKERHUB_USERNAME, github.sha) || format('skillpulse-backend:{0}', github.sha) }}
+            ${{ steps.vars.outputs.backend-tag }}
+            ${{ steps.vars.outputs.docker-user != '' && format('{0}/skillpulse-backend:latest', steps.vars.outputs.docker-user) || '' }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
 
       - name: Build and push frontend
-        id: meta-frontend
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: ./frontend
           push: ${{ vars.DEPLOY_ENABLED == 'true' }}
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/skillpulse-frontend:latest', secrets.DOCKERHUB_USERNAME) || 'skillpulse-frontend:latest' }}
-            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/skillpulse-frontend:{1}', secrets.DOCKERHUB_USERNAME, github.sha) || format('skillpulse-frontend:{0}', github.sha) }}
+            ${{ steps.vars.outputs.frontend-tag }}
+            ${{ steps.vars.outputs.docker-user != '' && format('{0}/skillpulse-frontend:latest', steps.vars.outputs.docker-user) || '' }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
 
-  # ─────────────────────────────────────────────
-  # Job 3: Container Scan — Trivy (Backend)
-  # ─────────────────────────────────────────────
+  
   trivy-backend:
     name: Trivy Scan — Backend
     runs-on: ubuntu-latest
@@ -93,19 +120,17 @@ jobs:
       - name: Run Trivy on backend image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: >-
-            ${{ secrets.DOCKERHUB_USERNAME != '' &&
-              format('{0}/skillpulse-backend:{1}', secrets.DOCKERHUB_USERNAME, github.sha) ||
-              format('skillpulse-backend:{0}', github.sha) }}
+          image-ref: ${{ needs.build-and-push.outputs.backend-tag }}
           format: sarif
           output: trivy-backend.sarif
           severity: CRITICAL,HIGH
-          exit-code: '1'           # pipeline fail karo agar CRITICAL/HIGH mile
+          exit-code: '1'
           ignore-unfixed: true
 
       - name: Upload Trivy backend SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        # FIX 4: CodeQL v3 → v4
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-backend.sarif
           category: trivy-backend
@@ -126,10 +151,7 @@ jobs:
       - name: Run Trivy on frontend image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: >-
-            ${{ secrets.DOCKERHUB_USERNAME != '' &&
-              format('{0}/skillpulse-frontend:{1}', secrets.DOCKERHUB_USERNAME, github.sha) ||
-              format('skillpulse-frontend:{0}', github.sha) }}
+          image-ref: ${{ needs.build-and-push.outputs.frontend-tag }}
           format: sarif
           output: trivy-frontend.sarif
           severity: CRITICAL,HIGH
@@ -138,7 +160,28 @@ jobs:
 
       - name: Upload Trivy frontend SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        # FIX 5: CodeQL v3 → v4
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-frontend.sarif
           category: trivy-frontend
+
+
+  trigger-cd:
+    name: Trigger CD
+    runs-on: ubuntu-latest
+    needs: [semgrep, trivy-backend, trivy-frontend]
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+    permissions:
+      contents: write
+    steps:
+      - name: Dispatch CD workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              event_type: 'ci-success',
+              client_payload: { sha: context.sha }
+            })
