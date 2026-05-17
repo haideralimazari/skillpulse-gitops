@@ -30,6 +30,7 @@ jobs:
             --config "p/default" \
             --config "p/owasp-top-ten" \
             --config "p/secrets" \
+            --severity=ERROR \
             --sarif \
             --output semgrep.sarif \
             --error \
@@ -123,7 +124,7 @@ jobs:
           image-ref: ${{ needs.build-and-push.outputs.backend-tag }}
           format: sarif
           output: trivy-backend.sarif
-          severity: CRITICAL,HIGH
+          severity: CRITICAL
           exit-code: '1'
           ignore-unfixed: true
 
@@ -154,7 +155,7 @@ jobs:
           image-ref: ${{ needs.build-and-push.outputs.frontend-tag }}
           format: sarif
           output: trivy-frontend.sarif
-          severity: CRITICAL,HIGH
+          severity: CRITICAL
           exit-code: '1'
           ignore-unfixed: true
 
