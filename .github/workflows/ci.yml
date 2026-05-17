@@ -45,27 +45,23 @@ jobs:
           category: semgrep
 
   # ─────────────────────────────────────────────
-  # Job 2: Build & Push Docker images
-  # ─────────────────────────────────────────────
   build-and-push:
     name: Build & Push Images
     runs-on: ubuntu-latest
     outputs:
       backend-tag:  ${{ steps.vars.outputs.backend-tag }}
       frontend-tag: ${{ steps.vars.outputs.frontend-tag }}
-      docker-user:  ${{ steps.vars.outputs.docker-user }}
     steps:
       - uses: actions/checkout@v4
-
+ 
       - uses: docker/setup-buildx-action@v4
-
+ 
       - name: Compute image tags
         id: vars
         env:
           DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           if [ -z "$DOCKER_USER" ]; then
-            echo "WARNING: DOCKERHUB_USERNAME not set — images will not be pushed."
             BACKEND_TAG="skillpulse-backend:${{ github.sha }}"
             FRONTEND_TAG="skillpulse-frontend:${{ github.sha }}"
           else
@@ -74,37 +70,67 @@ jobs:
           fi
           echo "backend-tag=${BACKEND_TAG}"   >> "$GITHUB_OUTPUT"
           echo "frontend-tag=${FRONTEND_TAG}" >> "$GITHUB_OUTPUT"
-          echo "docker-user=${DOCKER_USER}"   >> "$GITHUB_OUTPUT"
-
+ 
       - uses: docker/login-action@v4
         if: ${{ vars.DEPLOY_ENABLED == 'true' }}
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push backend
+ 
+      - name: Build backend
         uses: docker/build-push-action@v6
         with:
           context: ./backend
-          push: ${{ vars.DEPLOY_ENABLED == 'true' }}
-          tags: |
-            ${{ steps.vars.outputs.backend-tag }}
-            ${{ steps.vars.outputs.docker-user != '' && format('{0}/skillpulse-backend:latest', steps.vars.outputs.docker-user) || '' }}
+          # load: true — image ko local Docker daemon mein load karo (tar ke liye)
+          load: true
+          push: false
+          tags: ${{ steps.vars.outputs.backend-tag }}
           cache-from: type=gha
           cache-to:   type=gha,mode=max
-
-      - name: Build and push frontend
+ 
+      - name: Build frontend
         uses: docker/build-push-action@v6
         with:
           context: ./frontend
-          push: ${{ vars.DEPLOY_ENABLED == 'true' }}
-          tags: |
-            ${{ steps.vars.outputs.frontend-tag }}
-            ${{ steps.vars.outputs.docker-user != '' && format('{0}/skillpulse-frontend:latest', steps.vars.outputs.docker-user) || '' }}
+          load: true
+          push: false
+          tags: ${{ steps.vars.outputs.frontend-tag }}
           cache-from: type=gha
           cache-to:   type=gha,mode=max
-
-  
+ 
+      # Image ko tar mein save karo taake Trivy jobs load kar sakein
+      - name: Save images as tar
+        run: |
+          docker save ${{ steps.vars.outputs.backend-tag }}  -o backend.tar
+          docker save ${{ steps.vars.outputs.frontend-tag }} -o frontend.tar
+ 
+      - name: Upload backend image tar
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-image
+          path: backend.tar
+          retention-days: 1
+ 
+      - name: Upload frontend image tar
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-image
+          path: frontend.tar
+          retention-days: 1
+ 
+      - name: Push images to DockerHub
+        if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+        env:
+          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          docker push ${{ steps.vars.outputs.backend-tag }}
+          docker push ${{ steps.vars.outputs.frontend-tag }}
+          # latest tag bhi push karo
+          docker tag ${{ steps.vars.outputs.backend-tag }}  ${DOCKER_USER}/skillpulse-backend:latest
+          docker tag ${{ steps.vars.outputs.frontend-tag }} ${DOCKER_USER}/skillpulse-frontend:latest
+          docker push ${DOCKER_USER}/skillpulse-backend:latest
+          docker push ${DOCKER_USER}/skillpulse-frontend:latest
+ 
   # ─────────────────────────────────────────────
   # Job 3: Container Scan — Trivy (Backend)
   # ─────────────────────────────────────────────
@@ -117,10 +143,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-
+ 
       
-      - name: Pull backend image
-        run: docker pull ${{ needs.build-and-push.outputs.backend-tag }}
+      - name: Download backend image tar
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-image
+ 
+      - name: Load backend image
+        run: docker load -i backend.tar
  
       - name: Run Trivy on backend image
         uses: aquasecurity/trivy-action@v0.36.0
@@ -129,17 +160,16 @@ jobs:
           format: sarif
           output: trivy-backend.sarif
           severity: CRITICAL
-          exit-code: '0' 
+          exit-code: '0'
           ignore-unfixed: true
-        continue-on-error: true 
-
+ 
       - name: Upload Trivy backend SARIF
-        if: always()
+        if: ${{ always() && hashFiles('trivy-backend.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: trivy-backend.sarif 
+          sarif_file: trivy-backend.sarif
           category: trivy-backend
-
+ 
   # ─────────────────────────────────────────────
   # Job 4: Container Scan — Trivy (Frontend)
   # ─────────────────────────────────────────────
@@ -152,10 +182,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-
-      - name: Pull frontend image
-        run: docker pull ${{ needs.build-and-push.outputs.frontend-tag }}
-
+ 
+      - name: Download frontend image tar
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-image
+ 
+      - name: Load frontend image
+        run: docker load -i frontend.tar
+ 
       - name: Run Trivy on frontend image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -163,18 +198,18 @@ jobs:
           format: sarif
           output: trivy-frontend.sarif
           severity: CRITICAL
-          exit-code: '0' # 
+          exit-code: '0'
           ignore-unfixed: true
-        continue-on-error: true 
-
+ 
       - name: Upload Trivy frontend SARIF
-        if: always()
+        if: ${{ always() && hashFiles('trivy-frontend.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-frontend.sarif
           category: trivy-frontend
-
-
+ 
+  # ─────────────────────────────────────────────
+  # Job 5: CD Trigger──
   trigger-cd:
     name: Trigger CD
     runs-on: ubuntu-latest
