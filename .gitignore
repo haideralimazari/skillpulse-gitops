@@ -14,9 +14,3 @@ Thumbs.db
 # Logs
 *.log
 
-# Local Claude Code guidance
-CLAUDE.md
-
-# Intermediate PDF render output (regenerated from .md + .css)
-docs/skillpulse-cicd-guide.html
-docs/skillpulse-kubernetes-guide.html
