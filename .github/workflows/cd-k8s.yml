@@ -1,4 +1,4 @@
-name: CD (GitOps)
+name: GitOps — Environment Sync
 
 on:
   repository_dispatch:
